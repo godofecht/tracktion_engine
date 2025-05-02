@@ -439,7 +439,7 @@ WaveDeviceDescription* WaveDeviceDescriptionList::findMatchingDevice (const Wave
     return nullptr;
 }
 
-static void ensureDevicesForAllChannels (std::vector<WaveDeviceDescription>& groups, uint32_t targetNumChannels)
+static void ensureFullChannelCoverage (std::vector<WaveDeviceDescription>& groups, uint32_t targetNumChannels)
 {
     if (targetNumChannels == 0)
     {
@@ -592,8 +592,8 @@ static void refreshNamesInList (std::vector<WaveDeviceDescription>& descriptions
 
 void WaveDeviceDescriptionList::sanityCheckList()
 {
-    ensureDevicesForAllChannels (inputs,  (uint32_t) deviceInputChannelNames.size());
-    ensureDevicesForAllChannels (outputs, (uint32_t) deviceOutputChannelNames.size());
+    ensureFullChannelCoverage (inputs,  (uint32_t) deviceInputChannelNames.size());
+    ensureFullChannelCoverage (outputs, (uint32_t) deviceOutputChannelNames.size());
 
     refreshNamesInList (inputs, deviceInputChannelNames, true);
     refreshNamesInList (outputs, deviceOutputChannelNames, false);
@@ -637,15 +637,12 @@ bool WaveDeviceDescriptionList::setChannelCountInDevice (const WaveDeviceDescrip
     return false;
 }
 
-void WaveDeviceDescriptionList::setDeviceEnabled (const WaveDeviceDescription& desc, bool isInput, bool enabled)
+void WaveDeviceDescriptionList::setDeviceEnabled (const WaveDeviceDescription& d, bool isInput, bool enabled)
 {
-    for (auto& i : isInput ? inputs : outputs)
+    if (auto desc = findMatchingDevice (d, isInput))
     {
-        if (i.channels == desc.channels)
-        {
-            i.enabled = enabled;
-            return;
-        }
+        desc->enabled = enabled;
+        return;
     }
 
     jassertfalse; // The description passed in didn't come from this list (or is an out-of-date version)
