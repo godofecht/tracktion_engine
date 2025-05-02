@@ -194,7 +194,6 @@ bool WaveDeviceDescription::operator!= (const WaveDeviceDescription& other) cons
 choc::value::Value WaveDeviceDescription::toJSON() const
 {
     return choc::json::create ("enabled", enabled,
-                               "name", name.toStdString(),
                                "channels", choc::value::createArray ((uint32_t) channels.size(),
                                                [&] (uint32_t index)
                                                {
@@ -215,7 +214,7 @@ WaveDeviceDescription WaveDeviceDescription::fromJSON (const choc::value::ValueV
         chans.push_back (ChannelIndex (index, channelTypeFromAbbreviatedName (type)));
     }
 
-    return { json["name"].toString(), std::move (chans), json["enabled"].getBool() };
+    return { {}, std::move (chans), json["enabled"].getWithDefault<bool> (true) };
 }
 
 std::string WaveDeviceDescription::toString() const
@@ -460,18 +459,18 @@ static void ensureDevicesForAllChannels (std::vector<WaveDeviceDescription>& gro
     {
         uint32_t previousEnd = 0;
 
-        for (size_t i = 0; i < groups.size(); ++i)
+        for (auto group = groups.begin(); group != groups.end(); ++group)
         {
-            auto range = groups[i].getDeviceChannelRange();
+            auto range = group->getDeviceChannelRange();
             auto start = range.first;
             auto end = range.second;
 
             if (end > targetNumChannels)
             {
                 if (targetNumChannels > start)
-                    groups[i].setNumChannels (start, targetNumChannels - start);
+                    group->setNumChannels (start, targetNumChannels - start);
                 else
-                    groups.erase (groups.begin() + i);
+                    groups.erase (group);
 
                 return true;
             }
@@ -479,9 +478,9 @@ static void ensureDevicesForAllChannels (std::vector<WaveDeviceDescription>& gro
             if (start < previousEnd)
             {
                 if (end > previousEnd)
-                    groups[i].setNumChannels (previousEnd, end - previousEnd);
+                    group->setNumChannels (previousEnd, end - previousEnd);
                 else
-                    groups.erase (groups.begin() + i);
+                    groups.erase (group);
 
                 return true;
             }
@@ -493,11 +492,22 @@ static void ensureDevicesForAllChannels (std::vector<WaveDeviceDescription>& gro
                 if (start - previousEnd > 1 && (previousEnd & 1) == 0)
                     numToInsert = 2;
 
-                groups.insert (groups.begin() + i, WaveDeviceDescription::withNumChannels ({}, previousEnd, numToInsert, false));
+                groups.insert (group, WaveDeviceDescription::withNumChannels ({}, previousEnd, numToInsert, true));
                 return true;
             }
 
             previousEnd = range.second;
+        }
+
+        if (targetNumChannels > previousEnd)
+        {
+            uint32_t numToInsert = 1;
+
+            if (targetNumChannels - previousEnd > 1 && (previousEnd & 1) == 0)
+                numToInsert = 2;
+
+            groups.push_back (WaveDeviceDescription::withNumChannels ({}, previousEnd, numToInsert, true));
+            return true;
         }
 
         return false;
@@ -559,7 +569,7 @@ static juce::String getDefaultChannelName (bool isInput, uint32_t index)
 
 static void refreshNamesInList (std::vector<WaveDeviceDescription>& descriptions, juce::StringArray channelNames, bool isInput)
 {
-    if (channelNames.size() == 2)
+    if (channelNames.size() <= 2)
     {
         channelNames.set (0, getDefaultChannelName (isInput, 0));
         channelNames.set (1, getDefaultChannelName (isInput, 1));
