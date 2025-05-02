@@ -240,10 +240,12 @@ namespace tracktion::inline engine
             {
                 CRASH_TRACER
                 juce::OwnedArray<AutomationCurve> newCurves;
+                auto& ts = edit.tempoSequence;
+                auto um = &ts.edit.getUndoManager();
 
                 {
-                    std::unique_ptr<AutomationCurve> curve (new AutomationCurve());
-                    curve->setOwnerParameter (&parameter->parameter);
+                    auto curve = std::make_unique<AutomationCurve> (edit, AutomationCurve::TimeBase::time);
+                    curve->setParameterID (parameter->parameter.paramID);
 
                     for (int i = 0; i < parameter->changes.size(); ++i)
                     {
@@ -255,33 +257,33 @@ namespace tracktion::inline engine
                             if (curve->getNumPoints() > 0)
                             {
                                 newCurves.add (curve.release());
-                                curve = std::make_unique<AutomationCurve>();
-                                curve->setOwnerParameter (&parameter->parameter);
+                                curve = std::make_unique<AutomationCurve> (edit, AutomationCurve::TimeBase::time);
+                                curve->setParameterID (parameter->parameter.paramID);
                             }
                         }
 
-                        const float oldVal = (i == 0) ? (parameter->parameter.getCurve().getNumPoints() > 0 ? parameter->parameter.getCurve().getValueAt (change.time)
+                        const float oldVal = (i == 0) ? (parameter->parameter.getCurve().getNumPoints() > 0 ? parameter->parameter.getCurve().getValueAt (change.time, parameter->parameter.getCurrentBaseValue())
                                                                                                             : parameter->originalValue)
-                                                      : curve->getValueAt (change.time);
+                                                      : curve->getValueAt (change.time, parameter->parameter.getCurrentBaseValue());
 
                         const float newVal = parameter->parameter.snapToState (change.value);
 
                         if (parameter->parameter.isDiscrete())
                         {
-                            curve->addPoint (change.time, oldVal, 0.0f);
-                            curve->addPoint (change.time, newVal, 0.0f);
+                            curve->addPoint (change.time, oldVal, 0.0f, um);
+                            curve->addPoint (change.time, newVal, 0.0f, um);
                         }
                         else
                         {
                             if (std::abs (oldVal - newVal) > (parameter->parameter.getValueRange().getLength() * 0.21f))
                             {
                                 if (i == 0)
-                                    curve->addPoint (change.time - TimeDuration::fromSeconds (0.000001), oldVal, 0.0f);
+                                    curve->addPoint (change.time - TimeDuration::fromSeconds (0.000001), oldVal, 0.0f, um);
                                 else
-                                    curve->addPoint (change.time, oldVal, 0.0f);
+                                    curve->addPoint (change.time, oldVal, 0.0f, um);
                             }
 
-                            curve->addPoint (change.time, newVal, 0.0f);
+                            curve->addPoint (change.time, newVal, 0.0f, um);
                         }
                     }
 
@@ -293,28 +295,30 @@ namespace tracktion::inline engine
 
                 for (int i = 0; i < newCurves.size(); ++i)
                 {
-                    auto& curve = *newCurves.getUnchecked (i);
+                    auto& sourceCurve = *newCurves.getUnchecked (i);
 
-                    if (curve.getNumPoints() > 0)
+                    if (sourceCurve.getNumPoints() > 0)
                     {
-                        auto startTime = curve.getPointTime (0);
+                        auto startTime = sourceCurve.getPointTime (0);
                         auto endTime = end;
 
                         if (i < newCurves.size() - 1)
-                            endTime = curve.getPointTime (curve.getNumPoints() - 1);
+                            endTime = sourceCurve.getPointTime (sourceCurve.getNumPoints() - 1);
 
                         // if the curve is empty, set the parameter so that the bits outside the new curve
                         // are set to the levels they were at when we started recording..
                         if (parameter->parameter.getCurve().getNumPoints() == 0)
                             parameter->parameter.setParameter (parameter->originalValue, juce::sendNotification);
 
-                        auto& c = parameter->parameter.getCurve();
+                        auto& destCurve = parameter->parameter.getCurve();
                         TimeRange curveRange (startTime, endTime + glideLength);
-                        c.mergeOtherCurve (curve, curveRange,
-                                           startTime, glideLength, false, toEnd);
+                        mergeCurve (destCurve, curveRange,
+                                    sourceCurve, startTime,
+                                    parameter->parameter.getCurrentBaseValue(), glideLength,
+                                    false, toEnd);
 
                         if (engine.getPropertyStorage().getProperty (SettingID::simplifyAfterRecording, true))
-                            c.simplify (curveRange.expanded (TimeDuration::fromSeconds (0.001)), 0.01, 0.002f);
+                            destCurve.simplify (curveRange.expanded (TimeDuration::fromSeconds (0.001)), 0.01, 0.002f, um);
                     }
                 }
             }
@@ -488,7 +492,7 @@ namespace tracktion::inline engine
                     : owner (o), parameter (p), originalValue (value), trigger (t)
                 {
                     if (auto& tc = p.getEdit().getTransport(); tc.looping)
-                        valueAtLoopEnd = p.getCurve().getValueAt (tc.getLoopRange().getEnd());
+                        valueAtLoopEnd = p.getCurve().getValueAt (tc.getLoopRange().getEnd(), parameter.getCurrentBaseValue());
 
                     parameter.addListener (this);
                 }
@@ -611,22 +615,23 @@ namespace tracktion::inline engine
 
                 auto& autoParamData = *(*recordedParam);
                 auto& curve = param.getCurve();
+                auto um = &edit.getUndoManager();
                 assert (autoParamData.lastChangeFlushed);
 
                 // Glide last param
                 if (autoParamData.glideTime != 0_td)
                 {
                     const TimeRange glideRange (autoParamData.lastChangeFlushed->time, autoParamData.glideTime);
-                    const auto valueAtGlideEnd = curve.getValueAt (glideRange.getEnd());
-                    curve.removePointsInRegion (glideRange.withStart (glideRange.getStart() + 1us));
-                    curve.addPoint (glideRange.getEnd(), valueAtGlideEnd, param.isDiscrete() ? 1.0f : 0.0f);
+                    const auto valueAtGlideEnd = curve.getValueAt (glideRange.getEnd(), param.getCurrentBaseValue());
+                    curve.removePointsInRegion (glideRange.withStart (glideRange.getStart() + 1us), um);
+                    curve.addPoint (glideRange.getEnd(), valueAtGlideEnd, param.isDiscrete() ? 1.0f : 0.0f, um);
                 }
 
                 // Then simplify the sections
                 if (engine.getPropertyStorage().getProperty (SettingID::simplifyAfterRecording, true))
                     for (auto subRange : autoParamData.timeRangeCovered.getRanges())
                         curve.simplify (TimeRange (subRange.getStart(), subRange.getEnd()).expanded (0.001_td),
-                                        0.01, 0.002f);
+                                        0.01, 0.002f, um);
 
                 param.resetRecordingStatus();
 
@@ -733,9 +738,9 @@ namespace tracktion::inline engine
                                                                              : changesLoopEnd.back();
                         changesLoopEnd.emplace_back (timeRangeLoopEnd.getEnd(), endChangeLoopEnd.value);
                         changesLoopEnd.emplace_back (timeRangeLoopEnd.getEnd(), paramData->valueAtLoopEnd ? *paramData->valueAtLoopEnd
-                                                                                                          : curve.getValueAt (timeRangeLoopEnd.getEnd() + 1us));
+                                                                                                          : curve.getValueAt (timeRangeLoopEnd.getEnd() + 1us, paramData->parameter.getCurrentBaseValue()));
                         // Extend end so that points at the loop end are cleared
-                        flushSection (curve, withEndExtended (timeRangeLoopEnd, TimeDuration (1us)), changesLoopEnd);
+                        flushSection (paramData->parameter, curve, withEndExtended (timeRangeLoopEnd, TimeDuration (1us)), changesLoopEnd);
                         paramData->timeRangeCovered.addRange ({ timeRangeLoopEnd.getStart(), timeRangeLoopEnd.getEnd() });
 
                         // Then the wrapped start
@@ -744,7 +749,7 @@ namespace tracktion::inline engine
                         changesLoopStart.emplace (changesLoopStart.begin(),
                                                   timeRangeLoopStart.getStart(), endChangeLoopEnd.value);
                         changesLoopStart.emplace_back (timeRangeLoopStart.getEnd(), endChangeLoopStart.value);
-                        flushSection (curve, timeRangeLoopStart, changesLoopStart);
+                        flushSection (paramData->parameter, curve, timeRangeLoopStart, changesLoopStart);
                         paramData->timeRangeCovered.addRange ({ timeRangeLoopStart.getStart(), timeRangeLoopStart.getEnd() });
                         paramData->lastChangeFlushed = endChangeLoopStart;
                     }
@@ -756,7 +761,7 @@ namespace tracktion::inline engine
                                                                             : paramData->changes.getReference (paramData->changes.size() - 1);
                         paramData->changes.add ({ timeRange.getEnd(), endChange.value });
 
-                        flushSection (curve, timeRange, paramData->changes);
+                        flushSection (paramData->parameter, curve, timeRange, paramData->changes);
                         paramData->timeRangeCovered.addRange ({ timeRange.getStart(), timeRange.getEnd() });
                         paramData->lastChangeFlushed = endChange;
                     }
@@ -765,22 +770,22 @@ namespace tracktion::inline engine
                 }
             }
 
-            static void flushSection (AutomationCurve& curve, TimeRange time, std::span<AutomationParamData::Change> changes)
+            static void flushSection (AutomatableParameter& parameter, AutomationCurve& curve, TimeRange time, std::span<AutomationParamData::Change> changes)
             {
                 if (time.isEmpty())
                     return;
 
-                auto& parameter = *curve.getOwnerParameter();
+                auto um = &parameter.getEdit().getUndoManager();
 
                 // Remove all events in this range
-                curve.removePointsInRegion (time.withStart (time.getStart() + 1us));
+                curve.removePointsInRegion (time.withStart (time.getStart() + 1us), um);
 
                 // Iterate all the changes and add them to the curve
                 for (auto change : changes)
                 {
                     assert (time.containsInclusive (change.time));
                     const float newVal = parameter.snapToState (change.value);
-                    curve.addPoint (change.time, newVal, parameter.isDiscrete() ? 1.0f : 0.0f);
+                    curve.addPoint (change.time, newVal, parameter.isDiscrete() ? 1.0f : 0.0f, um);
                 }
             }
 
@@ -788,10 +793,12 @@ namespace tracktion::inline engine
             {
                 CRASH_TRACER
                 juce::OwnedArray<AutomationCurve> newCurves;
+                auto& ts = edit.tempoSequence;
+                auto um = &ts.edit.getUndoManager();
 
                 {
-                    std::unique_ptr<AutomationCurve> curve (new AutomationCurve());
-                    curve->setOwnerParameter (&parameter->parameter);
+                    auto curve = std::make_unique<AutomationCurve> (edit, AutomationCurve::TimeBase::time);
+                    curve->setParameterID (parameter->parameter.paramID);
 
                     for (int i = 0; i < parameter->changes.size(); ++i)
                     {
@@ -803,33 +810,33 @@ namespace tracktion::inline engine
                             if (curve->getNumPoints() > 0)
                             {
                                 newCurves.add (curve.release());
-                                curve = std::make_unique<AutomationCurve>();
-                                curve->setOwnerParameter (&parameter->parameter);
+                                curve = std::make_unique<AutomationCurve> (edit, AutomationCurve::TimeBase::time);
+                                curve->setParameterID (parameter->parameter.paramID);
                             }
                         }
 
-                        const float oldVal = (i == 0) ? (parameter->parameter.getCurve().getNumPoints() > 0 ? parameter->parameter.getCurve().getValueAt (change.time)
+                        const float oldVal = (i == 0) ? (parameter->parameter.getCurve().getNumPoints() > 0 ? parameter->parameter.getCurve().getValueAt (change.time, parameter->parameter.getCurrentBaseValue())
                                                                                                             : parameter->originalValue)
-                                                      : curve->getValueAt (change.time);
+                                                      : curve->getValueAt (change.time, parameter->parameter.getCurrentBaseValue());
 
                         const float newVal = parameter->parameter.snapToState (change.value);
 
                         if (parameter->parameter.isDiscrete())
                         {
-                            curve->addPoint (change.time, oldVal, 0.0f);
-                            curve->addPoint (change.time, newVal, 0.0f);
+                            curve->addPoint (change.time, oldVal, 0.0f, um);
+                            curve->addPoint (change.time, newVal, 0.0f, um);
                         }
                         else
                         {
                             if (std::abs (oldVal - newVal) > (parameter->parameter.getValueRange().getLength() * 0.21f))
                             {
                                 if (i == 0)
-                                    curve->addPoint (change.time - TimeDuration::fromSeconds (0.000001), oldVal, 0.0f);
+                                    curve->addPoint (change.time - TimeDuration::fromSeconds (0.000001), oldVal, 0.0f, um);
                                 else
-                                    curve->addPoint (change.time, oldVal, 0.0f);
+                                    curve->addPoint (change.time, oldVal, 0.0f, um);
                             }
 
-                            curve->addPoint (change.time, newVal, 0.0f);
+                            curve->addPoint (change.time, newVal, 0.0f, um);
                         }
                     }
 
@@ -841,28 +848,30 @@ namespace tracktion::inline engine
 
                 for (int i = 0; i < newCurves.size(); ++i)
                 {
-                    auto& curve = *newCurves.getUnchecked (i);
+                    auto& sourceCurve = *newCurves.getUnchecked (i);
 
-                    if (curve.getNumPoints() > 0)
+                    if (sourceCurve.getNumPoints() > 0)
                     {
-                        auto startTime = curve.getPointTime (0);
+                        auto startTime = sourceCurve.getPointTime (0);
                         auto endTime = end;
 
                         if (i < newCurves.size() - 1)
-                            endTime = curve.getPointTime (curve.getNumPoints() - 1);
+                            endTime = sourceCurve.getPointTime (sourceCurve.getNumPoints() - 1);
 
                         // if the curve is empty, set the parameter so that the bits outside the new curve
                         // are set to the levels they were at when we started recording..
                         if (parameter->parameter.getCurve().getNumPoints() == 0)
                             parameter->parameter.setParameter (parameter->originalValue, juce::sendNotification);
 
-                        auto& c = parameter->parameter.getCurve();
+                        auto& destCurve = parameter->parameter.getCurve();
                         TimeRange curveRange (startTime, endTime + glideLength);
-                        c.mergeOtherCurve (curve, curveRange,
-                                           startTime, glideLength, false, toEnd);
+                        mergeCurve (destCurve, curveRange,
+                                    sourceCurve, startTime,
+                                    parameter->parameter.getCurrentBaseValue(), glideLength,
+                                    false, toEnd);
 
                         if (engine.getPropertyStorage().getProperty (SettingID::simplifyAfterRecording, true))
-                            c.simplify (curveRange.expanded (TimeDuration::fromSeconds (0.001)), 0.01, 0.002f);
+                            destCurve.simplify (curveRange.expanded (0.001_td), 0.01, 0.002f, um);
                     }
                 }
             }
