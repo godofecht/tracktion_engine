@@ -118,6 +118,7 @@ private:
     bool initialiseFromLegacyState (const juce::XmlElement&);
     bool setAllToNumChannels (std::vector<WaveDeviceDescription>&, uint32_t numChannels, bool isInput);
     void sanityCheckList();
+    WaveDeviceDescription* findMatchingDevice (const WaveDeviceDescription&, bool isInput);
 };
 
 

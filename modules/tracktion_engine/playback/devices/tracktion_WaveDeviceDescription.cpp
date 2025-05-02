@@ -231,56 +231,6 @@ WaveDeviceDescription WaveDeviceDescription::fromString (const std::string& s)
 //==============================================================================
 WaveDeviceDescriptionList::WaveDeviceDescriptionList() = default;
 
-static juce::String mergeChannelNames (const juce::StringArray& names)
-{
-    juce::String commonPrefix;
-    juce::StringArray suffixes;
-
-    for (auto& name : names)
-    {
-        juce::String prefix, suffix;
-
-        if (name.containsChar ('(') && name.trim().endsWithChar (')'))
-        {
-            prefix = name.upToLastOccurrenceOf ("(", false, false).trim();
-            suffix = name.fromLastOccurrenceOf ("(", false, false)
-                         .upToFirstOccurrenceOf (")", false, false).trim();
-        }
-        else
-        {
-            for (int i = name.length(); --i >= 0;)
-            {
-                if (juce::CharacterFunctions::isDigit (name[i]))
-                    suffix = juce::String::charToString (name[i]) + suffix;
-                else
-                    break;
-            }
-
-            prefix = name.dropLastCharacters (suffix.length()).trim();
-        }
-
-        if (prefix.isNotEmpty() && suffix.isNotEmpty())
-        {
-            if (commonPrefix.isEmpty() || commonPrefix == prefix)
-            {
-                commonPrefix = prefix;
-                suffixes.add (suffix);
-                continue;
-            }
-        }
-
-        return names.joinIntoString (" + ");
-    }
-
-    return commonPrefix + " " + suffixes.joinIntoString (" + ");
-}
-
-static juce::String getDefaultChannelName (bool isInput, uint32_t index)
-{
-    return juce::String (isInput ? TRANS("Input 123") : TRANS("Output 123"))
-            .replace ("123", std::to_string (index + 1));
-}
-
 static void describeStandardDevices (std::vector<WaveDeviceDescription>& descriptions, int totalChannelCount)
 {
     for (int i = 0; i < totalChannelCount; ++i)
@@ -479,44 +429,132 @@ bool WaveDeviceDescriptionList::updateForDevice (juce::AudioIODevice& device)
     return true;
 }
 
-static void appendDevicesWithChannelCount (std::vector<WaveDeviceDescription>& devices,
-                                           uint32_t startIndex, uint32_t channelsToAppend, uint32_t channelsPerDevice, bool isInput)
+WaveDeviceDescription* WaveDeviceDescriptionList::findMatchingDevice (const WaveDeviceDescription& d, bool isInput)
 {
-    while (channelsToAppend > 0)
-    {
-        auto numChannels = std::min (channelsToAppend, channelsPerDevice);
-        numChannels = (numChannels > 1 && (channelsPerDevice > 2 || startIndex % 2 == 0)) ? numChannels : 1u;
-        devices.push_back (WaveDeviceDescription::withNumChannels ({}, startIndex, numChannels, true));
-        channelsToAppend -= numChannels;
-        startIndex += numChannels;
-    }
+    for (auto& desc : (isInput ? inputs : outputs))
+        for (auto& chan : desc.channels)
+            if ((uint32_t) chan.indexInDevice >= d.getDeviceChannelRange().first
+                  && (uint32_t) chan.indexInDevice < d.getDeviceChannelRange().second)
+                 return std::addressof (desc);
+
+    return nullptr;
 }
 
-static void trimListToNumChannels (std::vector<WaveDeviceDescription>& devices, uint32_t targetNumChannels, bool isInput)
+static void ensureDevicesForAllChannels (std::vector<WaveDeviceDescription>& groups, uint32_t targetNumChannels)
 {
     if (targetNumChannels == 0)
     {
-        devices.clear();
+        groups.clear();
         return;
     }
 
-    while (countTotalSourceChannels (devices) > targetNumChannels)
+    for (auto& group : groups)
     {
-        auto lastRange = devices.back().getDeviceChannelRange();
+        auto range = group.getDeviceChannelRange();
 
-        if (lastRange.first < targetNumChannels)
-        {
-            devices.back().setNumChannels (targetNumChannels - lastRange.first);
-            break;
-        }
-
-        devices.pop_back();
+        if (range.second - range.first != group.getNumChannels())
+            group.setNumChannels (range.first, group.getNumChannels());
     }
 
-    auto numChans = countTotalSourceChannels (devices);
+    auto fixFirstNonContiguousGroup = [&]() -> bool
+    {
+        uint32_t previousEnd = 0;
 
-    if (numChans < targetNumChannels)
-        appendDevicesWithChannelCount (devices, numChans, targetNumChannels - numChans, 2, isInput);
+        for (size_t i = 0; i < groups.size(); ++i)
+        {
+            auto range = groups[i].getDeviceChannelRange();
+            auto start = range.first;
+            auto end = range.second;
+
+            if (end > targetNumChannels)
+            {
+                if (targetNumChannels > start)
+                    groups[i].setNumChannels (start, targetNumChannels - start);
+                else
+                    groups.erase (groups.begin() + i);
+
+                return true;
+            }
+
+            if (start < previousEnd)
+            {
+                if (end > previousEnd)
+                    groups[i].setNumChannels (previousEnd, end - previousEnd);
+                else
+                    groups.erase (groups.begin() + i);
+
+                return true;
+            }
+
+            if (start > previousEnd)
+            {
+                uint32_t numToInsert = 1;
+
+                if (start - previousEnd > 1 && (previousEnd & 1) == 0)
+                    numToInsert = 2;
+
+                groups.insert (groups.begin() + i, WaveDeviceDescription::withNumChannels ({}, previousEnd, numToInsert, false));
+                return true;
+            }
+
+            previousEnd = range.second;
+        }
+
+        return false;
+    };
+
+    while (fixFirstNonContiguousGroup())
+    {}
+}
+
+static juce::String mergeChannelNames (const juce::StringArray& names)
+{
+    juce::String commonPrefix;
+    juce::StringArray suffixes;
+
+    for (auto& name : names)
+    {
+        juce::String prefix, suffix;
+
+        if (name.containsChar ('(') && name.trim().endsWithChar (')'))
+        {
+            prefix = name.upToLastOccurrenceOf ("(", false, false).trim();
+            suffix = name.fromLastOccurrenceOf ("(", false, false)
+                         .upToFirstOccurrenceOf (")", false, false).trim();
+        }
+        else
+        {
+            for (int i = name.length(); --i >= 0;)
+            {
+                if (juce::CharacterFunctions::isDigit (name[i]))
+                    suffix = juce::String::charToString (name[i]) + suffix;
+                else
+                    break;
+            }
+
+            prefix = name.dropLastCharacters (suffix.length()).trim();
+        }
+
+        if (prefix.isNotEmpty() && suffix.isNotEmpty())
+        {
+            if (commonPrefix.isEmpty() || commonPrefix == prefix)
+            {
+                commonPrefix = prefix;
+                suffixes.add (suffix);
+                continue;
+            }
+        }
+
+        return names.joinIntoString (" + ");
+    }
+
+    return commonPrefix + " " + suffixes.joinIntoString (" + ");
+}
+
+static juce::String getDefaultChannelName (bool isInput, uint32_t index)
+{
+    return juce::String (isInput ? TRANS("Input 123") : TRANS("Output 123"))
+            .replace ("123", std::to_string (index + 1));
 }
 
 static void refreshNamesInList (std::vector<WaveDeviceDescription>& descriptions, juce::StringArray channelNames, bool isInput)
@@ -544,8 +582,8 @@ static void refreshNamesInList (std::vector<WaveDeviceDescription>& descriptions
 
 void WaveDeviceDescriptionList::sanityCheckList()
 {
-    trimListToNumChannels (inputs,  (uint32_t) deviceInputChannelNames.size(), true);
-    trimListToNumChannels (outputs, (uint32_t) deviceOutputChannelNames.size(), false);
+    ensureDevicesForAllChannels (inputs,  (uint32_t) deviceInputChannelNames.size());
+    ensureDevicesForAllChannels (outputs, (uint32_t) deviceOutputChannelNames.size());
 
     refreshNamesInList (inputs, deviceInputChannelNames, true);
     refreshNamesInList (outputs, deviceOutputChannelNames, false);
@@ -576,72 +614,13 @@ bool WaveDeviceDescriptionList::setAllToNumChannels (std::vector<WaveDeviceDescr
 bool WaveDeviceDescriptionList::setAllInputsToNumChannels (uint32_t numChannels)  { return setAllToNumChannels (inputs, numChannels, true); }
 bool WaveDeviceDescriptionList::setAllOutputsToNumChannels (uint32_t numChannels) { return setAllToNumChannels (outputs, numChannels, false); }
 
-static bool updateChannelLayout (std::vector<WaveDeviceDescription>& list, uint32_t deviceIndex, int numToAdd)
+bool WaveDeviceDescriptionList::setChannelCountInDevice (const WaveDeviceDescription& d, bool isInput, uint32_t newNumChannels)
 {
-    auto& device = list[deviceIndex];
-    auto newNumChannels = (int) device.getNumChannels() + numToAdd;
-
-    if (newNumChannels < 0)
+    if (auto desc = findMatchingDevice (d, isInput))
     {
-        jassertfalse;
-        return false;
-    }
-
-    device.setNumChannels ((uint32_t) newNumChannels);
-
-    if (numToAdd > 0)
-    {
-        while (numToAdd > 0)
-        {
-            jassert (deviceIndex + 1 < list.size());
-            auto& nextDevice = list[deviceIndex + 1];
-            auto nextDeviceChans = nextDevice.getNumChannels();
-
-            if (nextDeviceChans > (uint32_t) numToAdd)
-            {
-                nextDevice.setNumChannels (nextDeviceChans - (uint32_t) numToAdd);
-                break;
-            }
-
-            numToAdd -= nextDeviceChans;
-            list.erase (list.begin() + deviceIndex + 1);
-        }
-    }
-    else if (numToAdd < 0)
-    {
-        auto subsequentDeviceIndex = device.getDeviceChannelRange().second;
-
-        for (int i = 0; i < -numToAdd; ++i)
-            list.insert (list.begin() + deviceIndex + 1 + i,
-                         WaveDeviceDescription::withNumChannels ({}, subsequentDeviceIndex++, 1, false));
-    }
-
-    return true;
-}
-
-bool WaveDeviceDescriptionList::setChannelCountInDevice (const WaveDeviceDescription& desc, bool isInput, uint32_t newNumChannels)
-{
-    auto& list = isInput ? inputs : outputs;
-
-    for (uint32_t i = 0; i < list.size(); ++i)
-    {
-        for (auto& chan : list[i].channels)
-        {
-            if ((uint32_t) chan.indexInDevice >= desc.getDeviceChannelRange().first
-                 && (uint32_t) chan.indexInDevice < desc.getDeviceChannelRange().second)
-            {
-                auto maxChans = countTotalSourceChannels (list) - desc.getDeviceChannelRange().first;
-                newNumChannels = std::min (newNumChannels, maxChans);
-                auto numToAdd = (int) newNumChannels - (int) desc.getNumChannels();
-
-                if (numToAdd == 0)
-                    return false;
-
-                updateChannelLayout (list, i, numToAdd);
-                sanityCheckList();
-                return true;
-            }
-        }
+        desc->setNumChannels (newNumChannels);
+        sanityCheckList();
+        return true;
     }
 
     jassertfalse; // The description passed in didn't come from this list (or is an out-of-date version)
