@@ -128,6 +128,12 @@ public:
         nodePlayer.enableNodeMemorySharing (enableNodeMemorySharing);
     }
 
+    /// Enables or disables latency compensation - it is enabled by default.
+    void disableLatencyCompensation (bool shouldDisable)
+    {
+        nodePlayer.disableLatencyCompensation (shouldDisable);
+    }
+
 private:
     tracktion::graph::PlayHeadState& playHeadState;
     ProcessState& processState;
